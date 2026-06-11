@@ -50,7 +50,11 @@ class OptimizationPipeline:
             traffic_data: 交通数据
         """
         if node_ids is None:
-            node_ids = list(self.network_data.get('nodes', {}).keys())
+            nodes_data = self.network_data.get('nodes', {})
+        if isinstance(nodes_data, list):
+            node_ids = [n['node_id'] if isinstance(n, dict) else n for n in nodes_data]
+        else:
+            node_ids = list(nodes_data.keys())
         if algorithms is None:
             algorithms = OptimizerFactory.get_available_algorithms('intersection')
         if traffic_data is None:
@@ -166,8 +170,17 @@ class OptimizationPipeline:
         if algorithms is None:
             algorithms = OptimizerFactory.get_available_algorithms('network')
 
-        node_ids = list(self.network_data.get('nodes', {}).keys())
-        network_data = {'network_data': self.network_data}
+        nodes_data = self.network_data.get('nodes', {})
+        if isinstance(nodes_data, list):
+            node_ids = [n['node_id'] if isinstance(n, dict) else n for n in nodes_data]
+            nodes_dict = {n['node_id']: n for n in nodes_data if isinstance(n, dict)}
+        else:
+            node_ids = list(nodes_data.keys())
+            nodes_dict = nodes_data
+
+        normalized = dict(self.network_data)
+        normalized['nodes'] = nodes_dict
+        network_data = {'network_data': normalized}
         results = {}
         total_time = 0
 
@@ -213,7 +226,11 @@ class OptimizationPipeline:
         Returns:
             完整优化报告
         """
-        node_ids = list(self.network_data.get('nodes', {}).keys())
+        nodes_data = self.network_data.get('nodes', {})
+        if isinstance(nodes_data, list):
+            node_ids = [n['node_id'] if isinstance(n, dict) else n for n in nodes_data]
+        else:
+            node_ids = list(nodes_data.keys())
         edges = self.network_data.get('edges', [])
         n = len(node_ids)
 
