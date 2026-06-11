@@ -203,41 +203,66 @@ class SimulationEngine:
             return acceleration
     
     def _process_intersections(self):
-        """处理交叉口"""
-        # 简化实现: 根据信号灯状态决定是否放行
+        """处理交叉口车辆放行"""
         for node_id, signal in self.signals.items():
             if not signal.phases:
                 continue
-            
+
             current_phase = signal.phases[signal.current_phase]
             green_links = current_phase.get('green_links', [])
-            
-            # 检查等待的车辆
+
+            if not green_links:
+                phase_idx = signal.current_phase
+                edge_ids = list(self.links.keys())
+                if len(edge_ids) > 1:
+                    half = len(edge_ids) // 2
+                    green_links = edge_ids[:half] if phase_idx == 0 else edge_ids[half:]
+
             for edge_id in green_links:
                 link = self.links.get(edge_id)
                 if not link:
                     continue
-                
-                # 放行排队车辆
-                for vehicle in link.vehicles[:3]:  # 每次放行3辆
-                    if vehicle.speed < 1.0:  # 等待中的车辆
-                        vehicle.speed = vehicle.target_speed * 0.5  # 加速
+
+                discharge_count = min(3, len(link.vehicles))
+                for vehicle in link.vehicles[:discharge_count]:
+                    if vehicle.speed < 1.0:
+                        vehicle.speed = vehicle.target_speed * 0.5
     
     def _remove_completed_vehicles(self):
-        """移除完成的车辆"""
+        """移除已完成行程的车辆，支持全网多路段连续行驶"""
         completed = []
-        
+
         for vehicle_id, vehicle in self.vehicles.items():
             edge_data = self._get_edge_data(vehicle.link_id)
             if not edge_data:
                 continue
-            
+
             edge_length = edge_data.get('length', 1000)
-            
+
             if vehicle.position >= edge_length:
-                completed.append(vehicle_id)
-                self.total_vehicles_completed += 1
-        
+                to_node = edge_data.get('to', '')
+                next_edges = [
+                    e for e in self.network_data.get('edges', [])
+                    if e.get('from', '') == to_node and e.get('id', '') != vehicle.link_id
+                ]
+
+                if next_edges:
+                    next_edge = random.choice(next_edges)
+                    next_edge_id = next_edge['id']
+                    vehicle.link_id = next_edge_id
+                    vehicle.position = 0
+                    vehicle.target_speed = next_edge.get('speed_limit', 50) / 3.6
+
+                    old_link = self.links.get(vehicle.link_id)
+                    if old_link:
+                        old_link.vehicles = [v for v in old_link.vehicles if v.id != vehicle_id]
+
+                    if next_edge_id in self.links:
+                        self.links[next_edge_id].vehicles.append(vehicle)
+                else:
+                    completed.append(vehicle_id)
+                    self.total_vehicles_completed += 1
+
         for vehicle_id in completed:
             vehicle = self.vehicles.pop(vehicle_id)
             link = self.links.get(vehicle.link_id)

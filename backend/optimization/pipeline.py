@@ -278,8 +278,14 @@ class OptimizationPipeline:
         corridor_data = {'nodes': {}, 'edges': {}}
         speed_ms = speed / 3.6
 
+        nodes_data = self.network_data.get('nodes', {})
+        if isinstance(nodes_data, list):
+            nodes_dict = {n['node_id']: n for n in nodes_data if isinstance(n, dict)}
+        else:
+            nodes_dict = nodes_data
+
         for node_id in nodes:
-            node = self.network_data.get('nodes', {}).get(node_id, {})
+            node = nodes_dict.get(node_id, {})
             if isinstance(node, dict):
                 corridor_data['nodes'][node_id] = node
             else:
