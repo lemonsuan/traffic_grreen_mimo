@@ -1,11 +1,15 @@
 <template>
   <div class="analysis">
-    <div class="analysis-header">
-      <h1>数据分析</h1>
-      <div class="header-actions">
-        <button class="btn btn-secondary" @click="exportReport">导出报告</button>
+      <div class="analysis-header">
+        <h1>数据分析</h1>
+        <div class="header-actions">
+          <select v-model="selectedNetworkId" class="form-select" style="margin-right:12px">
+            <option :value="null">选择路网</option>
+            <option v-for="n in networks" :key="n.id" :value="n.id">{{ n.name }}</option>
+          </select>
+          <button class="btn btn-secondary" @click="exportReport">导出报告</button>
+        </div>
       </div>
-    </div>
 
     <div class="analysis-content">
       <div class="tabs">
@@ -243,7 +247,7 @@
 <script setup lang="ts">
 import { ref, computed, nextTick, onMounted } from 'vue'
 import * as echarts from 'echarts'
-import { optimizationApi } from '../api'
+import { optimizationApi, networkApi, analysisApi } from '../api'
 
 const currentTab = ref('metrics')
 
@@ -252,6 +256,12 @@ const tabs = [
   { id: 'comparison', name: '方案对比' },
   { id: 'reports', name: '分析报告' }
 ]
+
+// --- 路网数据 ---
+const networks = ref<Array<{ id: number; name: string; nodes: any[]; edges: any[] }>>([])
+const selectedNetworkId = ref<number | null>(null)
+
+const currentNetwork = computed(() => networks.value.find(n => n.id === selectedNetworkId.value))
 
 // --- 算法配置 ---
 const algorithmMap: Record<string, { name: string; description: string }> = {
@@ -278,6 +288,44 @@ function algorithmLabel(id: string): string {
   return algorithmMap[id]?.name || id
 }
 
+function buildTrafficData() {
+  const nodes = currentNetwork.value?.nodes || []
+  const edges = currentNetwork.value?.edges || []
+  if (nodes.length === 0) return {}
+  const nodeId = nodes[0].node_id
+  const connectedEdges = edges.filter((e: any) => e.from_node === nodeId || e.to_node === nodeId)
+  const approaches: Record<string, { volume: number }> = {}
+  const directions = ['north_through', 'south_through', 'east_through', 'west_through',
+    'north_left', 'south_left', 'east_left', 'west_left']
+  directions.forEach((dir, i) => {
+    const edge = connectedEdges[i % Math.max(connectedEdges.length, 1)]
+    const flow = edge ? (edge.capacity || 500) * 0.6 : 400 + Math.random() * 200
+    approaches[dir] = { volume: Math.round(flow) }
+  })
+  return { approaches }
+}
+
+async function loadNetworks() {
+  try {
+    const res = await networkApi.list()
+    const list = res.data.results || res.data || []
+    const detailed = await Promise.all(
+      list.map(async (n: any) => {
+        try {
+          const detail = await networkApi.get(n.id)
+          return { id: n.id, name: n.name, nodes: detail.data.nodes || [], edges: detail.data.edges || [] }
+        } catch {
+          return { id: n.id, name: n.name, nodes: [], edges: [] }
+        }
+      })
+    )
+    networks.value = detailed
+    if (detailed.length > 0) selectedNetworkId.value = detailed[0].id
+  } catch (e) {
+    console.error('获取路网列表失败:', e)
+  }
+}
+
 // --- 性能指标 Tab ---
 const metricsLevel = ref('intersection')
 const metricsAlgorithm = ref('webster')
@@ -297,37 +345,34 @@ function onLevelChange() {
 }
 
 async function runAnalysis() {
+  if (!selectedNetworkId.value) {
+    alert('请先选择路网')
+    return
+  }
   analyzing.value = true
   try {
     let res
     const params = {}
     if (metricsLevel.value === 'intersection') {
+      const nodes = currentNetwork.value?.nodes || []
+      const nodeId = nodes[0]?.node_id || 'demo_node'
       res = await optimizationApi.optimizeIntersection({
-        node_id: 'demo_node',
+        node_id: nodeId,
         algorithm: metricsAlgorithm.value,
         params,
-        traffic_data: {
-          approaches: {
-            north_through: { volume: 500 },
-            south_through: { volume: 450 },
-            east_through: { volume: 400 },
-            west_through: { volume: 380 },
-            north_left: { volume: 120 },
-            south_left: { volume: 100 },
-            east_left: { volume: 90 },
-            west_left: { volume: 80 }
-          }
-        }
+        traffic_data: buildTrafficData()
       })
     } else if (metricsLevel.value === 'corridor') {
+      const nodes = currentNetwork.value?.nodes || []
+      const nodeIds = nodes.slice(0, 4).map((n: any) => n.node_id)
       res = await optimizationApi.optimizeCorridor({
-        node_ids: ['node_A', 'node_B', 'node_C', 'node_D'],
+        node_ids: nodeIds.length >= 2 ? nodeIds : ['node_A', 'node_B', 'node_C', 'node_D'],
         algorithm: metricsAlgorithm.value,
         params
       })
     } else {
       res = await optimizationApi.optimizeNetwork({
-        network_id: 1,
+        network_id: selectedNetworkId.value,
         algorithm: metricsAlgorithm.value,
         params
       })
@@ -456,39 +501,36 @@ const hasPareto = computed(() =>
 
 async function runComparison() {
   if (selectedCompareAlgos.value.length === 0) return
+  if (!selectedNetworkId.value) {
+    alert('请先选择路网')
+    return
+  }
   comparing.value = true
   comparisonResults.value = []
 
-  const trafficData: Record<string, any> = {
-    intersection: {
-      approaches: {
-        north_through: { volume: 500 }, south_through: { volume: 450 },
-        east_through: { volume: 400 }, west_through: { volume: 380 },
-        north_left: { volume: 120 }, south_left: { volume: 100 },
-        east_left: { volume: 90 }, west_left: { volume: 80 }
-      }
-    },
-    corridor: {},
-    network: {}
-  }
+  const trafficData = buildTrafficData()
 
   try {
     for (const algo of selectedCompareAlgos.value) {
       let res
       if (compareLevel.value === 'intersection') {
+        const nodes = currentNetwork.value?.nodes || []
+        const nodeId = nodes[0]?.node_id || 'demo_node'
         res = await optimizationApi.optimizeIntersection({
-          node_id: 'demo_node',
+          node_id: nodeId,
           algorithm: algo,
-          traffic_data: trafficData.intersection
+          traffic_data: trafficData
         })
       } else if (compareLevel.value === 'corridor') {
+        const nodes = currentNetwork.value?.nodes || []
+        const nodeIds = nodes.slice(0, 4).map((n: any) => n.node_id)
         res = await optimizationApi.optimizeCorridor({
-          node_ids: ['node_A', 'node_B', 'node_C', 'node_D'],
+          node_ids: nodeIds.length >= 2 ? nodeIds : ['node_A', 'node_B', 'node_C', 'node_D'],
           algorithm: algo
         })
       } else {
         res = await optimizationApi.optimizeNetwork({
-          network_id: 1,
+          network_id: selectedNetworkId.value,
           algorithm: algo
         })
       }
@@ -632,18 +674,46 @@ function renderComparisonCharts() {
 }
 
 // --- 报告 Tab ---
-const reports = ref([
-  { id: 1, title: '干线仿真报告 #001', time: '2024-01-15 14:30' },
-  { id: 2, title: 'Webster优化报告', time: '2024-01-15 13:45' },
-  { id: 3, title: '区域路网分析报告', time: '2024-01-14 16:20' }
-])
+const reports = ref<Array<{ id: number; title: string; time: string; type: string }>>([])
 
-function exportReport() {
-  alert('导出报告功能待实现')
+async function loadReports() {
+  try {
+    const res = await analysisApi.getReports()
+    const data = res.data.results || res.data || []
+    reports.value = data.map((r: any) => ({
+      id: r.id,
+      title: r.title || `报告 #${r.id}`,
+      time: r.created_at ? new Date(r.created_at).toLocaleString('zh-CN') : '',
+      type: r.report_type || ''
+    }))
+  } catch (e) {
+    console.error('获取报告列表失败:', e)
+  }
+}
+
+async function exportReport() {
+  if (!selectedNetworkId.value) {
+    alert('请先选择路网')
+    return
+  }
+  try {
+    const res = await analysisApi.exportReport(selectedNetworkId.value, 'simulation', 'csv')
+    const blob = new Blob([res.data], { type: 'text/csv' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = `report_${selectedNetworkId.value}.csv`
+    a.click()
+    URL.revokeObjectURL(url)
+  } catch (e: any) {
+    console.error('导出失败:', e)
+    alert('导出失败: ' + (e.response?.data?.error || e.message))
+  }
 }
 
 onMounted(() => {
-  // 初始化默认图表
+  loadNetworks()
+  loadReports()
 })
 </script>
 

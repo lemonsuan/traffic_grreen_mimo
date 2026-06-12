@@ -143,6 +143,41 @@ class SimulationViewSet(viewsets.ModelViewSet):
             'results': simulation.results
         })
 
+    @action(detail=True, methods=['post'])
+    def step_batch(self, request, pk=None):
+        """批量执行多步仿真 (用于前端快速推进)"""
+        simulation = self.get_object()
+        
+        engine = simulation_engines.get(simulation.id)
+        if not engine or simulation.status != 'running':
+            return Response({'error': '仿真未在运行'}, status=400)
+        
+        steps = min(int(request.data.get('steps', 10)), 100)
+        state = None
+        for _ in range(steps):
+            state = engine.step()
+            if state['time'] >= simulation.duration:
+                break
+        
+        if state:
+            simulation.current_time = state['time']
+            simulation.total_vehicles = len(state['vehicles'])
+            
+            if state['time'] >= simulation.duration:
+                simulation.status = 'completed'
+                simulation.completed_at = timezone.now()
+                simulation.results = engine.get_results()
+            
+            simulation.save()
+            
+            return Response({
+                'simulation_id': simulation.id,
+                'status': simulation.status,
+                'state': state
+            })
+        
+        return Response({'error': '无状态'}, status=500)
+
     @action(detail=True, methods=['get'])
     def snapshots(self, request, pk=None):
         """获取仿真快照列表"""
@@ -172,6 +207,8 @@ class SimulationViewSet(viewsets.ModelViewSet):
 
     def _prepare_network_data(self, network):
         """准备路网数据"""
+        import random
+        
         nodes = []
         for node in network.nodes.all():
             nodes.append({
@@ -184,8 +221,16 @@ class SimulationViewSet(viewsets.ModelViewSet):
                 'y': node.y
             })
         
+        # 根据道路等级设定默认流量
+        flow_by_class = {
+            'motorway': 1800, 'trunk': 1500, 'primary': 1200,
+            'secondary': 800, 'tertiary': 500, 'residential': 200
+        }
+        
         edges = []
         for edge in network.edges.all():
+            base_flow = flow_by_class.get(edge.road_class, 600)
+            flow = base_flow * random.uniform(0.7, 1.3)
             edges.append({
                 'id': edge.edge_id,
                 'name': edge.name,
@@ -194,8 +239,9 @@ class SimulationViewSet(viewsets.ModelViewSet):
                 'length': edge.length,
                 'speed_limit': edge.speed_limit,
                 'lanes': edge.lanes_count,
-                'capacity': edge.capacity,
-                'flow': 500  # 默认流量
+                'capacity': edge.capacity or (1800 * edge.lanes_count),
+                'road_class': edge.road_class,
+                'flow': round(flow)
             })
         
         signals = []
@@ -204,7 +250,7 @@ class SimulationViewSet(viewsets.ModelViewSet):
             phases = []
             for phase in signal.phases.all().order_by('phase_index'):
                 green_links = list(
-                    phase.phaselane_set.values_list('lane__edge__edge_id', flat=True)
+                    phase.phase_lanes.values_list('lane__edge__edge_id', flat=True)
                 )
                 phases.append({
                     'index': phase.phase_index,

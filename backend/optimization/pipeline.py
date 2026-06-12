@@ -178,8 +178,24 @@ class OptimizationPipeline:
             node_ids = list(nodes_data.keys())
             nodes_dict = nodes_data
 
+        # 标准化边数据: 确保 from/to 键存在
+        edges = self.network_data.get('edges', [])
+        normalized_edges = []
+        for edge in edges:
+            e = dict(edge)
+            if 'from' not in e:
+                e['from'] = e.get('from_node', '')
+            if 'to' not in e:
+                e['to'] = e.get('to_node', '')
+            if 'flow' not in e:
+                e['flow'] = int(e.get('capacity', 1800) * 0.5)
+            if 'lanes' not in e:
+                e['lanes'] = e.get('lanes_count', 1)
+            normalized_edges.append(e)
+
         normalized = dict(self.network_data)
         normalized['nodes'] = nodes_dict
+        normalized['edges'] = normalized_edges
         network_data = {'network_data': normalized}
         results = {}
         total_time = 0

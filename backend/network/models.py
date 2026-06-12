@@ -163,6 +163,13 @@ class Lane(models.Model):
     # 交通属性
     speed_limit = models.FloatField(null=True, blank=True)  # 车道限速
     is_parking = models.BooleanField(default=False)  # 允许停车
+
+    # 信号灯类型
+    signal_display = models.CharField(max_length=10, default='round', choices=[
+        ('arrow', '箭头灯'),
+        ('round', '圆灯'),
+    ])
+    is_exclusive = models.BooleanField(default=False)  # 是否专用道(不受信号控制)
     
     class Meta:
         unique_together = ('edge', 'lane_index')
@@ -237,6 +244,15 @@ class Phase(models.Model):
     all_red_time = models.FloatField(default=1)  # 全红时间(秒)
     phase_type = models.CharField(max_length=20, choices=PHASE_TYPE_CHOICES, default='through')
     allowed_movements = models.JSONField(default=list)  # ['straight', 'left', 'right']
+
+    # 灯型配置
+    light_type = models.CharField(max_length=10, default='round', choices=[
+        ('arrow', '箭头灯'),
+        ('round', '圆灯'),
+        ('mixed', '混合'),
+    ])
+    protected_movements = models.JSONField(default=list)   # 箭头灯保护的转向 ['left','through','right']
+    permissive_movements = models.JSONField(default=list)  # 圆灯许可的转向(需让行)
     
     class Meta:
         unique_together = ('signal', 'phase_index')
@@ -300,3 +316,36 @@ class ODMatrix(models.Model):
 
     def __str__(self):
         return f"{self.from_node} -> {self.to_node}: {self.flow}"
+
+
+class HistorySnapshot(models.Model):
+    """历史快照 — 存储仿真/检测器的时序数据，支持任意时刻回放"""
+    SOURCE_CHOICES = [
+        ('simulation', '仿真'),
+        ('detector', '检测器'),
+        ('import', '导入'),
+    ]
+
+    network = models.ForeignKey(Network, on_delete=models.CASCADE, related_name='history_snapshots')
+    timestamp = models.DateTimeField(db_index=True)   # 真实时间
+    sim_time = models.FloatField(default=0)            # 仿真内时间(秒)
+    source = models.CharField(max_length=20, choices=SOURCE_CHOICES, default='simulation')
+
+    # 车辆状态 [{id, link_id, from_node, to_node, position, speed, lane}]
+    vehicles = models.JSONField(default=list)
+    # 信号灯状态 {node_id: {current_phase, phase_elapsed}}
+    signals = models.JSONField(default=dict)
+    # 聚合指标 {avg_delay, avg_queue_length, throughput, vcr, ...}
+    metrics = models.JSONField(default=dict)
+    # 每个交叉口的指标 {node_id: {delay, queue, vcr, stops}}
+    intersection_metrics = models.JSONField(default=dict)
+
+    class Meta:
+        verbose_name = '历史快照'
+        verbose_name_plural = verbose_name
+        indexes = [
+            models.Index(fields=['network', 'timestamp']),
+        ]
+
+    def __str__(self):
+        return f"{self.network.name} @ {self.timestamp}"

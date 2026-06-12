@@ -1,3 +1,8 @@
+/**
+ * 路由配置
+ * / → 路网列表页
+ * /network/:id → 路网工作台
+ */
 import { createRouter, createWebHistory } from 'vue-router'
 
 const router = createRouter({
@@ -5,28 +10,14 @@ const router = createRouter({
   routes: [
     {
       path: '/',
-      name: 'dashboard',
-      component: () => import('../views/Dashboard.vue')
+      name: 'network-list',
+      component: () => import('../views/NetworkList.vue')
     },
     {
-      path: '/network',
-      name: 'network',
-      component: () => import('../views/NetworkEditor.vue')
-    },
-    {
-      path: '/simulation',
-      name: 'simulation',
-      component: () => import('../views/Simulation.vue')
-    },
-    {
-      path: '/optimization',
-      name: 'optimization',
-      component: () => import('../views/Optimization.vue')
-    },
-    {
-      path: '/analysis',
-      name: 'analysis',
-      component: () => import('../views/Analysis.vue')
+      path: '/network/:id',
+      name: 'network-workspace',
+      component: () => import('../views/NetworkWorkspace.vue'),
+      props: true
     }
   ]
 })

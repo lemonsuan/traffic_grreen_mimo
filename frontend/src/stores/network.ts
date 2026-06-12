@@ -137,7 +137,7 @@ export const useNetworkStore = defineStore('network', () => {
 
   async function importNetwork(id: number, data: any) {
     try {
-      const res = await networkApi.import(id, data, 'json')
+      const res = await networkApi.importNetwork(id, data)
       await fetchNetworkDetail(id)
       return res.data
     } catch (e) {
@@ -148,7 +148,7 @@ export const useNetworkStore = defineStore('network', () => {
 
   async function exportNetwork(id: number) {
     try {
-      const res = await networkApi.export(id, 'json')
+      const res = await networkApi.exportNetwork(id)
       return res.data
     } catch (e) {
       console.error('导出路网失败:', e)

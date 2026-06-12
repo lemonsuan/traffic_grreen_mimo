@@ -64,7 +64,29 @@ export const networkApi = {
 
   // Import/Export
   importNetwork: (id: number, data: any) => api.post(`/networks/${id}/import_network/`, data),
-  exportNetwork: (id: number) => api.post(`/networks/${id}/export_network/`, {})
+  exportNetwork: (id: number) => api.post(`/networks/${id}/export_network/`, {}),
+
+  // OSM Import + Auto Channelize
+  fromBbox: (bbox: { south: number; west: number; north: number; east: number }, name: string) =>
+    api.post('/networks/from_bbox/', { bbox, name }),
+  autoChannelize: (id: number) => api.post(`/networks/${id}/auto_channelize/`),
+
+  // History
+  getHistory: (id: number, params: { date?: string; from?: string; to?: string; source?: string; limit?: number }) =>
+    api.get(`/networks/${id}/history/`, { params }),
+  getHistoryAt: (id: number, time: string) =>
+    api.get(`/networks/${id}/history/at/`, { params: { time } }),
+  getIntersectionHistory: (id: number, nodeId: string, date: string) =>
+    api.get(`/networks/${id}/history/intersection/`, { params: { node_id: nodeId, date } }),
+  getHistoryDates: (id: number) => api.get(`/networks/${id}/history/dates/`),
+}
+
+// Intersection API
+export const intersectionApi = {
+  getFullDetail: (id: number) => api.get(`/networks/intersections/${id}/full_detail/`),
+  updateChannelization: (id: number) => api.post(`/networks/intersections/${id}/update_channelization/`),
+  microSim: (id: number, data: { duration?: number; approaches?: Record<string, { flow: number }> }) =>
+    api.post(`/networks/intersections/${id}/micro_sim/`, data),
 }
 
 // Simulation API
@@ -76,6 +98,7 @@ export const simulationApi = {
   pause: (id: number) => api.post(`/simulation/${id}/pause/`),
   resume: (id: number) => api.post(`/simulation/${id}/resume/`),
   getState: (id: number) => api.get(`/simulation/${id}/state/`),
+  stepBatch: (id: number, steps: number) => api.post(`/simulation/${id}/step_batch/`, { steps }),
   getSnapshots: (id: number) => api.get(`/simulation/${id}/snapshots/`),
   getMetrics: (id: number) => api.get(`/simulation/${id}/metrics/`)
 }

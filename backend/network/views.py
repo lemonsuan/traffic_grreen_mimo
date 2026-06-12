@@ -337,6 +337,100 @@ class NetworkViewSet(viewsets.ModelViewSet):
 
         return Response(export_data)
 
+    @action(detail=False, methods=['post'])
+    def from_bbox(self, request):
+        """从地图框选区域导入OSM路网 + 自动渠化"""
+        from .osm_importer import import_to_db
+        from .auto_channelize import channelize_network
+
+        bbox = request.data.get('bbox')
+        name = request.data.get('name', 'OSM导入路网')
+
+        if not bbox or not all(k in bbox for k in ('south', 'west', 'north', 'east')):
+            return Response({'error': '需要bbox参数: {south, west, north, east}'},
+                          status=status.HTTP_400_BAD_REQUEST)
+
+        try:
+            network, stats = import_to_db(bbox, name)
+            # 自动渠化
+            channelize_result = channelize_network(network)
+            stats['channelize'] = channelize_result
+            return Response(stats, status=status.HTTP_201_CREATED)
+        except Exception as e:
+            return Response({'error': str(e)}, status=status.HTTP_500_INTERNAL_SERVER_ERROR)
+
+    @action(detail=True, methods=['post'])
+    def auto_channelize(self, request, pk=None):
+        """对已有路网自动渠化"""
+        from .auto_channelize import channelize_network
+
+        network = self.get_object()
+        result = channelize_network(network)
+        return Response(result)
+
+    @action(detail=True, methods=['get'])
+    def history(self, request, pk=None):
+        """查询历史快照"""
+        from .history import get_snapshots
+
+        network = self.get_object()
+        date = request.query_params.get('date')
+        from_time = request.query_params.get('from')
+        to_time = request.query_params.get('to')
+        source = request.query_params.get('source')
+        limit = int(request.query_params.get('limit', 3600))
+
+        snapshots = get_snapshots(network, date, from_time, to_time, source, limit)
+        data = list(snapshots.values('sim_time', 'timestamp', 'source', 'metrics'))
+        return Response(data)
+
+    @action(detail=True, methods=['get'])
+    def history_at(self, request, pk=None):
+        """查询指定时刻的快照"""
+        from .history import get_snapshot_at
+
+        network = self.get_object()
+        time_str = request.query_params.get('time')
+        if not time_str:
+            return Response({'error': '需要time参数'}, status=status.HTTP_400_BAD_REQUEST)
+
+        snapshot = get_snapshot_at(network, time_str)
+        if not snapshot:
+            return Response({'error': '未找到该时刻的数据'}, status=status.HTTP_404_NOT_FOUND)
+
+        return Response({
+            'sim_time': snapshot.sim_time,
+            'timestamp': snapshot.timestamp,
+            'vehicles': snapshot.vehicles,
+            'signals': snapshot.signals,
+            'metrics': snapshot.metrics,
+            'intersection_metrics': snapshot.intersection_metrics,
+        })
+
+    @action(detail=True, methods=['get'])
+    def history_intersection(self, request, pk=None):
+        """查询某个交叉口的历史指标"""
+        from .history import get_intersection_history
+
+        network = self.get_object()
+        node_id = request.query_params.get('node_id')
+        date = request.query_params.get('date')
+
+        if not node_id or not date:
+            return Response({'error': '需要node_id和date参数'}, status=status.HTTP_400_BAD_REQUEST)
+
+        data = get_intersection_history(network, node_id, date)
+        return Response(data)
+
+    @action(detail=True, methods=['get'])
+    def history_dates(self, request, pk=None):
+        """获取有历史数据的日期列表"""
+        from .history import get_available_dates
+
+        network = self.get_object()
+        dates = get_available_dates(network)
+        return Response(dates)
+
 
 class NodeViewSet(viewsets.ModelViewSet):
     queryset = Node.objects.all()
@@ -347,6 +441,137 @@ class NodeViewSet(viewsets.ModelViewSet):
 class IntersectionViewSet(viewsets.ModelViewSet):
     queryset = Intersection.objects.all()
     serializer_class = IntersectionSerializer
+
+    @action(detail=True, methods=['get'])
+    def full_detail(self, request, pk=None):
+        """获取交叉口完整数据: 车道+连接+信号+相位+映射"""
+        intersection = self.get_object()
+        node = intersection.node
+
+        try:
+            signal = Signal.objects.get(node=node)
+            phases = []
+            for phase in signal.phases.all().order_by('phase_index'):
+                phase_lanes = []
+                for pl in phase.phase_lanes.select_related('lane__edge').all():
+                    phase_lanes.append({
+                        'lane_id': pl.lane.id,
+                        'lane_index': pl.lane.lane_index,
+                        'lane_type': pl.lane.lane_type,
+                        'edge_id': pl.lane.edge.edge_id,
+                        'signal_display': pl.lane.signal_display,
+                    })
+                phases.append({
+                    'id': phase.id,
+                    'index': phase.phase_index,
+                    'green': phase.green_time,
+                    'yellow': phase.yellow_time,
+                    'all_red': phase.all_red_time,
+                    'phase_type': phase.phase_type,
+                    'light_type': phase.light_type,
+                    'protected_movements': phase.protected_movements,
+                    'permissive_movements': phase.permissive_movements,
+                    'phase_lanes': phase_lanes,
+                })
+            signal_data = {
+                'id': signal.id,
+                'cycle_length': signal.cycle_length,
+                'offset': signal.offset,
+                'control_mode': signal.control_mode,
+                'phases': phases,
+            }
+        except Signal.DoesNotExist:
+            signal_data = None
+
+        # 进口道车道
+        incoming = Edge.objects.filter(to_node=node, network=node.network)
+        approaches = {}
+        for edge in incoming:
+            dx = node.x - edge.from_node.x
+            dy = node.y - edge.from_node.y
+            if abs(dy) >= abs(dx):
+                direction = 'north' if dy > 0 else 'south'
+            else:
+                direction = 'east' if dx > 0 else 'west'
+
+            lanes = []
+            for lane in Lane.objects.filter(edge=edge).order_by('lane_index'):
+                connections = []
+                for conn in lane.outgoing_connections.all():
+                    connections.append({
+                        'to_edge': conn.to_lane.edge.edge_id,
+                        'to_lane_index': conn.to_lane.lane_index,
+                        'type': conn.connection_type,
+                    })
+                lanes.append({
+                    'id': lane.id,
+                    'index': lane.lane_index,
+                    'type': lane.lane_type,
+                    'width': lane.width,
+                    'signal_display': lane.signal_display,
+                    'is_exclusive': lane.is_exclusive,
+                    'connections': connections,
+                })
+
+            approaches[direction] = {
+                'edge_id': edge.edge_id,
+                'road_class': edge.road_class,
+                'lanes_count': edge.lanes_count,
+                'length': edge.length,
+                'speed_limit': edge.speed_limit,
+                'lanes': lanes,
+            }
+
+        return Response({
+            'node_id': node.node_id,
+            'name': node.name,
+            'lng': node.lng,
+            'lat': node.lat,
+            'x': node.x,
+            'y': node.y,
+            'intersection_type': intersection.intersection_type,
+            'control_type': intersection.control_type,
+            'signal': signal_data,
+            'approaches': approaches,
+        })
+
+    @action(detail=True, methods=['post'])
+    def update_channelization(self, request, pk=None):
+        """更新渠化方案, 自动重建相位"""
+        from .auto_channelize import rebuild_phases_on_lane_change
+
+        intersection = self.get_object()
+        result = rebuild_phases_on_lane_change(intersection)
+        return Response(result)
+
+    @action(detail=True, methods=['post'])
+    def micro_sim(self, request, pk=None):
+        """单交叉口微观仿真"""
+        from .micro_sim import IntersectionMicroSim, build_intersection_data_from_db
+
+        intersection = self.get_object()
+        duration = int(request.data.get('duration', 300))
+
+        data = build_intersection_data_from_db(intersection)
+
+        # 允许前端覆盖流量参数
+        flow_overrides = request.data.get('approaches', {})
+        for direction, override in flow_overrides.items():
+            if direction in data.get('approaches', {}):
+                data['approaches'][direction]['flow'] = override.get('flow', data['approaches'][direction]['flow'])
+
+        sim = IntersectionMicroSim(data, {'duration': duration, 'step_size': 1.0})
+
+        snapshots = []
+        for _ in range(duration):
+            state = sim.step()
+            if _ % 5 == 0:  # 每5秒存一个快照
+                snapshots.append(state)
+
+        return Response({
+            'results': sim.get_results(),
+            'snapshots': snapshots,
+        })
 
 
 class RoundaboutViewSet(viewsets.ModelViewSet):

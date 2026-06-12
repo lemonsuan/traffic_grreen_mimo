@@ -3,6 +3,11 @@
     <div class="sim-header">
       <h1>仿真控制台</h1>
       <div class="header-controls">
+        <div class="view-buttons" v-if="sceneReady">
+          <button class="btn btn-sm" @click="sceneManager?.setTopView()">俯视</button>
+          <button class="btn btn-sm" @click="sceneManager?.setPerspectiveView()">透视</button>
+          <button class="btn btn-sm" @click="sceneManager?.setSideView()">侧视</button>
+        </div>
         <button class="btn btn-primary" @click="handleStart" :disabled="simulationStore.isRunning || !config.networkId">
           ▶️ 启动
         </button>
@@ -71,6 +76,10 @@
               <div class="metric-value">{{ simulationStore.vehicleCount }}</div>
               <div class="metric-label">总车辆数</div>
             </div>
+            <div class="metric-item">
+              <div class="metric-value">{{ simulationStore.metrics.vcr.toFixed(2) }}</div>
+              <div class="metric-label">饱和度 V/C</div>
+            </div>
           </div>
         </div>
       </div>
@@ -82,7 +91,6 @@
             <div class="placeholder-text">3D仿真视图</div>
             <div class="placeholder-subtext">选择路网后启动仿真</div>
           </div>
-          <canvas ref="threeCanvas"></canvas>
         </div>
 
         <div class="sim-footer">
@@ -105,16 +113,18 @@
 import { ref, computed, onMounted, onUnmounted, watch } from 'vue'
 import { useSimulationStore } from '../stores/simulation'
 import { networkApi } from '../api'
-import * as THREE from 'three'
+import { SceneManager } from '../three/SceneManager'
+import { RoadRenderer } from '../three/RoadRenderer'
+import { VehicleRenderer, VehicleState } from '../three/VehicleRenderer'
+import { SignalRenderer, SignalState } from '../three/SignalRenderer'
 
 const simulationStore = useSimulationStore()
 
 const canvasContainer = ref<HTMLElement | null>(null)
-const threeCanvas = ref<HTMLCanvasElement | null>(null)
 const sceneReady = ref(false)
 const speedMultiplier = ref(1)
 
-const networks = ref<Array<{ id: number; name: string }>>([])
+const networks = ref<Array<{ id: number; name: string; nodes: any[]; edges: any[] }>>([])
 
 const config = ref({
   networkId: '',
@@ -132,11 +142,12 @@ const statusText = computed(() => {
   return map[simulationStore.status] || simulationStore.status
 })
 
-let scene: THREE.Scene | null = null
-let camera: THREE.PerspectiveCamera | null = null
-let renderer: THREE.WebGLRenderer | null = null
-let animFrameId: number | null = null
-const vehicleMeshes: Map<string, THREE.Mesh> = new Map()
+let sceneManager: SceneManager | null = null
+let roadRenderer: RoadRenderer | null = null
+let vehicleRenderer: VehicleRenderer | null = null
+let signalRenderer: SignalRenderer | null = null
+const nodePositionMap = new Map<string, { x: number; y: number }>()
+const edgeDataMap = new Map<string, { from: string; to: string; length: number }>()
 
 function formatTime(seconds: number): string {
   const h = Math.floor(seconds / 3600)
@@ -145,108 +156,138 @@ function formatTime(seconds: number): string {
   return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}`
 }
 
-function initThreeScene() {
-  if (!threeCanvas.value || !canvasContainer.value) return
+function initScene() {
+  if (!canvasContainer.value) return
 
-  const container = canvasContainer.value
-  const width = container.clientWidth
-  const height = container.clientHeight
+  sceneManager = new SceneManager(canvasContainer.value)
+  roadRenderer = new RoadRenderer(sceneManager.getScene())
+  vehicleRenderer = new VehicleRenderer(sceneManager.getScene())
+  signalRenderer = new SignalRenderer(sceneManager.getScene())
 
-  scene = new THREE.Scene()
-  scene.background = new THREE.Color(0xf0f2f5)
-
-  camera = new THREE.PerspectiveCamera(60, width / height, 0.1, 10000)
-  camera.position.set(0, 500, 500)
-  camera.lookAt(0, 0, 0)
-
-  renderer = new THREE.WebGLRenderer({ canvas: threeCanvas.value, antialias: true })
-  renderer.setSize(width, height)
-  renderer.setPixelRatio(window.devicePixelRatio)
-
-  const ambientLight = new THREE.AmbientLight(0xffffff, 0.6)
-  scene.add(ambientLight)
-  const directionalLight = new THREE.DirectionalLight(0xffffff, 0.8)
-  directionalLight.position.set(500, 1000, 500)
-  scene.add(directionalLight)
-
-  const groundGeo = new THREE.PlaneGeometry(2000, 2000)
-  const groundMat = new THREE.MeshStandardMaterial({ color: 0xe8e8e8 })
-  const ground = new THREE.Mesh(groundGeo, groundMat)
-  ground.rotation.x = -Math.PI / 2
-  scene.add(ground)
-
-  const gridHelper = new THREE.GridHelper(2000, 40, 0xcccccc, 0xdddddd)
-  scene.add(gridHelper)
-
+  sceneManager.startAnimationLoop()
   sceneReady.value = true
-  animate()
 }
 
-function animate() {
-  animFrameId = requestAnimationFrame(animate)
-  if (renderer && scene && camera) {
-    renderer.render(scene, camera)
+function loadNetworkToScene(networkId: number) {
+  const network = networks.value.find(n => n.id === networkId)
+  if (!network || !roadRenderer || !signalRenderer) return
+
+  roadRenderer.clear()
+  signalRenderer.clear()
+  vehicleRenderer?.clear()
+  nodePositionMap.clear()
+  edgeDataMap.clear()
+
+  const nodes = network.nodes || []
+  const edges = network.edges || []
+
+  // 用OSM投影坐标(x,y)
+  nodes.forEach((node: any) => {
+    const x = node.x || 0
+    const y = node.y || 0
+    nodePositionMap.set(node.node_id, { x, y })
+    roadRenderer!.addNode({
+      id: node.node_id, x, y,
+      type: node.node_type === 'roundabout' ? 'roundabout' : 'intersection'
+    })
+  })
+
+  edges.forEach((edge: any) => {
+    const fromPos = nodePositionMap.get(edge.from_node)
+    const toPos = nodePositionMap.get(edge.to_node)
+    if (fromPos && toPos) {
+      edgeDataMap.set(edge.edge_id, {
+        from: edge.from_node,
+        to: edge.to_node,
+        length: edge.length || 300
+      })
+      roadRenderer!.addEdge(
+        { id: edge.edge_id, from: edge.from_node, to: edge.to_node, lanes: edge.lanes_count || 2, width: (edge.lanes_count || 2) * 3.5 },
+        { id: edge.from_node, x: fromPos.x, y: fromPos.y, type: 'intersection' },
+        { id: edge.to_node, x: toPos.x, y: toPos.y, type: 'intersection' }
+      )
+    }
+  })
+
+  const signalsData = (network as any).signals || []
+  signalsData.forEach((signal: any) => {
+    const pos = nodePositionMap.get(signal.node_id)
+    if (pos && signal.phases) {
+      signalRenderer!.addSignal({
+        nodeId: signal.node_id,
+        x: pos.x,
+        y: pos.y,
+        currentPhase: 0,
+        phases: signal.phases.map((p: any, i: number) => ({
+          index: i,
+          green: p.green || p.green_time || 30,
+          yellow: p.yellow || p.yellow_time || 3,
+          allRed: p.all_red || p.all_red_time || 1
+        }))
+      })
+    }
+  })
+
+  if (sceneManager) {
+    const xs = nodes.map((n: any) => n.x || 0)
+    const ys = nodes.map((n: any) => n.y || 0)
+    const cx = (Math.min(...xs) + Math.max(...xs)) / 2
+    const cy = (Math.min(...ys) + Math.max(...ys)) / 2
+    const range = Math.max(Math.max(...xs) - Math.min(...xs), Math.max(...ys) - Math.min(...ys), 500)
+    sceneManager.setCameraPosition(cx + range * 0.5, range * 0.8, cy + range * 0.5)
   }
 }
 
-function addRoadNode(x: number, z: number, nodeId: string) {
-  if (!scene) return
-  const geo = new THREE.CylinderGeometry(8, 8, 4, 16)
-  const mat = new THREE.MeshStandardMaterial({ color: 0x1890ff })
-  const mesh = new THREE.Mesh(geo, mat)
-  mesh.position.set(x, 2, z)
-  mesh.name = `node_${nodeId}`
-  scene.add(mesh)
-}
+function mapVehicleToState(v: any): VehicleState {
+  const fromId = v.from_node || ''
+  const toId = v.to_node || ''
+  const fromPos = nodePositionMap.get(fromId)
+  const toPos = nodePositionMap.get(toId)
+  const edgeLen = v.edge_length || 300
 
-function addRoadEdge(x1: number, z1: number, x2: number, z2: number) {
-  if (!scene) return
-  const dx = x2 - x1
-  const dz = z2 - z1
-  const length = Math.sqrt(dx * dx + dz * dz)
-  const angle = Math.atan2(dx, dz)
+  let x = 0, y = 0, angle = 0
 
-  const geo = new THREE.BoxGeometry(12, 0.5, length)
-  const mat = new THREE.MeshStandardMaterial({ color: 0x333333 })
-  const mesh = new THREE.Mesh(geo, mat)
-  mesh.position.set((x1 + x2) / 2, 0.25, (z1 + z2) / 2)
-  mesh.rotation.y = angle
-  scene.add(mesh)
-}
-
-function updateVehicles(vehicles: any[]) {
-  if (!scene) return
-
-  const existingIds = new Set(vehicles.map((v: any) => v.id))
-
-  for (const [id, mesh] of vehicleMeshes) {
-    if (!existingIds.has(id)) {
-      scene.remove(mesh)
-      vehicleMeshes.delete(id)
-    }
+  if (fromPos && toPos) {
+    const progress = Math.min(Math.max((v.position || 0) / edgeLen, 0), 1)
+    x = fromPos.x + (toPos.x - fromPos.x) * progress
+    y = fromPos.y + (toPos.y - fromPos.y) * progress
+    angle = Math.atan2(toPos.x - fromPos.x, toPos.y - fromPos.y)
   }
 
-  for (const v of vehicles) {
-    let mesh = vehicleMeshes.get(v.id)
-    if (!mesh) {
-      const geo = new THREE.BoxGeometry(6, 4, 10)
-      const mat = new THREE.MeshStandardMaterial({ color: 0x52c41a })
-      mesh = new THREE.Mesh(geo, mat)
-      scene.add(mesh)
-      vehicleMeshes.set(v.id, mesh)
-    }
-    const x = (v.position || 0) * 0.5 - 500
-    const z = Math.random() * 200 - 100
-    mesh.position.set(x, 2, z)
+  return {
+    id: v.id,
+    x, y, z: 0,
+    rotation: angle,
+    speed: v.speed || 0,
+    type: 'car'
   }
 }
 
 watch(() => simulationStore.vehicles, (newVehicles) => {
-  updateVehicles(newVehicles)
+  if (!vehicleRenderer) return
+  const states = newVehicles.map(mapVehicleToState)
+  vehicleRenderer.updateVehicles(states)
+}, { deep: true })
+
+watch(() => simulationStore.signals, (newSignals) => {
+  if (!signalRenderer) return
+  Object.entries(newSignals).forEach(([nodeId, sigState]: [string, any]) => {
+    const pos = nodePositionMap.get(nodeId)
+    if (pos) {
+      signalRenderer!.updateSignal({
+        nodeId,
+        x: pos.x,
+        y: pos.y,
+        currentPhase: sigState.current_phase || 0,
+        phases: []
+      })
+    }
+  })
 }, { deep: true })
 
 async function handleStart() {
   if (!config.value.networkId) return
+  loadNetworkToScene(Number(config.value.networkId))
   await simulationStore.startSimulation({
     network_id: Number(config.value.networkId),
     duration: config.value.duration,
@@ -265,40 +306,40 @@ async function handleStop() {
 
 function handleReset() {
   simulationStore.reset()
-  vehicleMeshes.forEach((mesh) => {
-    scene?.remove(mesh)
-  })
-  vehicleMeshes.clear()
+  vehicleRenderer?.clear()
 }
 
 function handleResize() {
-  if (!canvasContainer.value || !camera || !renderer) return
-  const w = canvasContainer.value.clientWidth
-  const h = canvasContainer.value.clientHeight
-  camera.aspect = w / h
-  camera.updateProjectionMatrix()
-  renderer.setSize(w, h)
+  if (!canvasContainer.value || !sceneManager) return
+  sceneManager.resize(canvasContainer.value.clientWidth, canvasContainer.value.clientHeight)
 }
 
 onMounted(async () => {
-  initThreeScene()
+  initScene()
   window.addEventListener('resize', handleResize)
 
   try {
     const res = await networkApi.list()
-    networks.value = (res.data.results || res.data || []).map((n: any) => ({
-      id: n.id,
-      name: n.name
-    }))
+    const list = res.data.results || res.data || []
+    const detailed = await Promise.all(
+      list.map(async (n: any) => {
+        try {
+          const detail = await networkApi.get(n.id)
+          return { id: n.id, name: n.name, nodes: detail.data.nodes || [], edges: detail.data.edges || [], signals: detail.data.signals || [] }
+        } catch {
+          return { id: n.id, name: n.name, nodes: [], edges: [], signals: [] }
+        }
+      })
+    )
+    networks.value = detailed
   } catch (e) {
     console.error('获取路网列表失败:', e)
   }
 })
 
 onUnmounted(() => {
-  if (animFrameId) cancelAnimationFrame(animFrameId)
   window.removeEventListener('resize', handleResize)
-  renderer?.dispose()
+  sceneManager?.dispose()
 })
 </script>
 
@@ -326,6 +367,27 @@ onUnmounted(() => {
 .header-controls {
   display: flex;
   gap: 12px;
+  align-items: center;
+}
+
+.view-buttons {
+  display: flex;
+  gap: 4px;
+  margin-right: 8px;
+}
+
+.btn-sm {
+  padding: 4px 10px;
+  font-size: 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 4px;
+  background: white;
+  cursor: pointer;
+}
+
+.btn-sm:hover {
+  border-color: #1890ff;
+  color: #1890ff;
 }
 
 .sim-content {
@@ -430,7 +492,8 @@ onUnmounted(() => {
   overflow: hidden;
 }
 
-.canvas-container canvas {
+.canvas-container canvas,
+.canvas-container :deep(canvas) {
   width: 100% !important;
   height: 100% !important;
   display: block;

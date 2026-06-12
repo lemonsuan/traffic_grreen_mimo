@@ -79,6 +79,7 @@ class SimulationMetrics(models.Model):
     max_queue_length = models.IntegerField(default=0)  # 最大排队长度
     throughput = models.IntegerField(default=0)  # 吞吐量(辆)
     avg_stops = models.FloatField(default=0)  # 平均停车次数
+    vcr = models.FloatField(default=0)  # 饱和度(V/C比)
     
     # 路口级指标
     intersection_metrics = models.JSONField(default=dict)  # 各路口指标

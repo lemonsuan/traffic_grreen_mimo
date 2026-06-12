@@ -9,6 +9,9 @@ export interface Vehicle {
   position: number
   speed: number
   stops: number
+  from_node: string
+  to_node: string
+  edge_length: number
 }
 
 export interface SignalState {
@@ -22,6 +25,7 @@ export interface SimulationMetrics {
   max_queue_length: number
   throughput: number
   avg_stops: number
+  vcr: number
 }
 
 export interface SimulationConfig {
@@ -44,10 +48,13 @@ export const useSimulationStore = defineStore('simulation', () => {
     avg_queue_length: 0,
     max_queue_length: 0,
     throughput: 0,
-    avg_stops: 0
+    avg_stops: 0,
+    vcr: 0
   })
 
   let pollTimer: ReturnType<typeof setInterval> | null = null
+  let batchSteps = 10
+  let pollInterval = 100
 
   const progress = computed(() =>
     duration.value > 0 ? (currentTime.value / duration.value) * 100 : 0
@@ -62,6 +69,11 @@ export const useSimulationStore = defineStore('simulation', () => {
       status.value = 'running'
       currentTime.value = 0
       duration.value = config.duration
+
+      const speed = config.speed_multiplier || 1
+      batchSteps = Math.max(1, Math.round(speed * 5))
+      pollInterval = Math.max(50, Math.round(200 / speed))
+
       startPolling()
       return res.data
     } catch (e) {
@@ -113,7 +125,7 @@ export const useSimulationStore = defineStore('simulation', () => {
   async function fetchState() {
     if (!simulationId.value) return
     try {
-      const res = await simulationApi.getState(simulationId.value)
+      const res = await simulationApi.stepBatch(simulationId.value, batchSteps)
       const data = res.data
 
       status.value = data.status
@@ -125,8 +137,6 @@ export const useSimulationStore = defineStore('simulation', () => {
         if (data.state.metrics) {
           updateMetrics(data.state.metrics)
         }
-      } else {
-        currentTime.value = data.current_time || 0
       }
 
       if (data.status === 'completed') {
@@ -139,7 +149,7 @@ export const useSimulationStore = defineStore('simulation', () => {
 
   function startPolling() {
     stopPolling()
-    pollTimer = setInterval(fetchState, 1000)
+    pollTimer = setInterval(fetchState, pollInterval)
   }
 
   function stopPolling() {
@@ -155,7 +165,8 @@ export const useSimulationStore = defineStore('simulation', () => {
       avg_queue_length: data.avg_queue_length || 0,
       max_queue_length: data.max_queue_length || 0,
       throughput: data.throughput || 0,
-      avg_stops: data.avg_stops || 0
+      avg_stops: data.avg_stops || 0,
+      vcr: data.vcr || 0
     }
   }
 
@@ -171,7 +182,8 @@ export const useSimulationStore = defineStore('simulation', () => {
       avg_queue_length: 0,
       max_queue_length: 0,
       throughput: 0,
-      avg_stops: 0
+      avg_stops: 0,
+      vcr: 0
     }
   }
 
